@@ -64,11 +64,14 @@ openssl-3.2.2-6.el9_5.x86_64
 
 ```bash
 # 安裝 containerd
+yum-config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
 sudo yum install -y containerd.io
 
 # 建立預設配置
 sudo mkdir -p /etc/containerd
 containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = false/' /etc/containerd/config.toml
+# ref https://kubernetes.io/zh-cn/docs/setup/production-environment/container-runtimes/#cgroup-drivers
 
 # 啟用 containerd
 sudo systemctl enable --now containerd
@@ -87,11 +90,11 @@ sudo yum install -y podman
 cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
 EOF
 
 # 安裝 Kubernetes 套件
