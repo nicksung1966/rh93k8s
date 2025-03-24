@@ -17,31 +17,54 @@
 ## **步驟 1：關閉 Swap 及 SELinux ＆ 網路前置作業**
 
 ```bash
+#分别修改各个主机名称
+hostnamectl --static set-hostname k8s-master
+
+#关闭防火墙和禁用 selinux
+sestatus && setenforce 0 && sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+## 关闭防火墙，并禁止自启动
+systemctl stop firewalld && systemctl disable firewalld && systemctl status firewalld
+
 # 關閉 Swap
 sudo swapoff -a
 
 # 永久禁用 Swap
 sudo sed -i '/ swap / s/^/#/' /etc/fstab
 
-# 關閉 SELinux
-sudo setenforce 0
-
-# 永久禁用 SELinux
-sudo sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
-
-＃ 關閉防火牆
-systemctl stop firewalld
-systemctl disable firewalld
-
-cat <<EOF > /etc/sysctl.d/k8s.conf
-net.ipv4.ip_forward = 1 
-net.bridge.bridge-nf-call-iptables = 1
+# 集群机器均绑定 hostname
+cat >> /etc/hosts << EOF
+192.168.60.143 k8s-master
+192.168.93.144 k8s-node01
+192.168.93.145 k8s-node02
 EOF
 
-sysctl --system
+## # 加载 overlay 内核模块
+modprobe overlay
+
+# 往内核中加载 br_netfilter模块
+modprobe br_netfilter
+
+cat >> /etc/sysctl.conf << EOF
+# 启用ipv6桥接转发
+net.bridge.bridge-nf-call-ip6tables = 1
+# 启用ipv4桥接转发
+net.bridge.bridge-nf-call-iptables = 1
+# 开启路由转发功能
+net.ipv4.ip_forward = 1
+# 禁用swap分区
+vm.swappiness = 0
+EOF
+
+加载文件内容
+$ sysctl -p
+
+# 系統重新啟動
+reboot
 
 # 註冊 RedHat系統
 subscription-manager register
+
+#時間同步
 
 ## 安裝套件
 yum install -y ipvsadm conntrack sysstat curl
@@ -68,7 +91,7 @@ openssl-3.2.2-6.el9_5.x86_64
 
 # Add the Docker repository (since containerd.io is part of Docker's dependencies)
 sudo yum install -y yum-utils
-sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo yum-config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
 
 ---- part 1 ----
 
@@ -80,8 +103,14 @@ sudo yum install -y containerd.io
 sudo mkdir -p /etc/containerd
 containerd config default | sudo tee /etc/containerd/config.toml
 
+# 修改SystemdCgroup = true
+vi /etc/containerd/config.toml
+# or
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+
 # 啟用 containerd
-sudo systemctl enable --now containerd
+systemctl enable --now containerd
 
 
 systemctl status containerd
@@ -103,37 +132,18 @@ sudo yum install -y podman
 cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
 EOF
 
 # 安裝 Kubernetes 套件
-sudo yum install -y kubelet kubeadm kubectl
+yum install -y kubelet kubeadm kubectl
 
 # 啟用 kubelet
 sudo systemctl enable --now kubelet
-systemctl enable kubelet
-systemctl enable containerd
-
-echo "br_netfilter" >> /etc/modules-load.d/br_netfilter.conf
-# echo "ip_vs" | sudo tee -a /etc/modules-load.d/ip_vs.conf
-
-
-modprobe br_netfilter
-# modprobe ip_vs
-
-編輯 /etc/sysctl.conf，並添加以下行：
-
-net.bridge.bridge-nf-call-iptables = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-
-
-
-
-
 ```
 
 ---
@@ -142,18 +152,62 @@ net.bridge.bridge-nf-call-ip6tables = 1
 
 ```bash
 # 1. 產生初始化設定檔
-# kubeadm config print init-defaults > init-config.yaml
+kubeadm config print init-defaults > init-config.yaml
 
 # 2. 查看 Kubernetes 需要的映像檔
-# kubeadm config images list --config=init-config.yaml
+kubeadm config images list --config=init-config.yaml
 
 # 3. 預先下載映像檔
-# kubeadm config images pull --config=init-config.yaml
+kubeadm config images pull --config=init-config.yaml
 
+#如無法下載映像檔, 請打開ipv6, 或是以docker 另行下載image並手動導入
+#docker 安裝
+yum install -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin
+systemctl start docker
+
+#請以其他台有docker機器下載所需images (可能還要開ipv6)
+kubeadm config images list --config=init-config.yaml
+registry.k8s.io/kube-apiserver:v1.31.0
+registry.k8s.io/kube-controller-manager:v1.31.0
+registry.k8s.io/kube-scheduler:v1.31.0
+registry.k8s.io/kube-proxy:v1.31.0
+registry.k8s.io/coredns/coredns:v1.11.3
+registry.k8s.io/pause:3.10
+registry.k8s.io/etcd:3.5.15-0
+
+docker pull registry.k8s.io/kube-apiserver:v1.31.0
+docker pull registry.k8s.io/kube-controller-manager:v1.31.0
+docker pull registry.k8s.io/kube-scheduler:v1.31.0
+docker pull registry.k8s.io/kube-proxy:v1.31.0
+docker pull registry.k8s.io/coredns/coredns:v1.11.3
+docker pull registry.k8s.io/pause:3.10
+docker pull registry.k8s.io/etcd:3.5.15-0
+
+docker save -o kube-apiserver_v1.31.0.tar registry.k8s.io/kube-apiserver:v1.31.0
+docker save -o kube-controller-manager_v1.31.0.tar registry.k8s.io/kube-controller-manager:v1.31.0
+docker save -o kube-scheduler_v1.31.0.tar  registry.k8s.io/kube-scheduler:v1.31.0
+docker save -o kube-proxy_v1.31.0.tar registry.k8s.io/kube-proxy:v1.31.0
+docker save -o coredns.v1.11.3.tar registry.k8s.io/coredns/coredns:v1.11.3
+docker save -o pause_3.10.tar registry.k8s.io/pause:3.10
+docker pull -o etcd_3.5.15-0.tar registry.k8s.io/etcd:3.5.15-0
+
+ctr -n k8s.io image import kube-apiserver_v1.31.0.tar
+ctr -n k8s.io image import kube-controller-manager_v1.31.0.tar
+ctr -n k8s.io image import kube-scheduler_v1.31.0.tar
+ctr -n k8s.io image import kube-proxy_v1.31.0.tar
+ctr -n k8s.io image import coredns.v1.11.3.tar
+ctr -n k8s.io image import pause_3.10.tar
+ctr -n k8s.io image import etcd_3.5.15-0.tar
+
+ctr -n k8s.io image list
+crictl image
 
 
 # 4. 正式初始化 Kubernetes 叢集
-# kubeadm init --config=init-config.yaml
+kubeadm init --config=init-config.yaml
+
+systemctl enable kubelet
+
 
 
 
@@ -164,10 +218,10 @@ MASTER_IP="192.168.1.100"
 sudo kubeadm init \
 #  --apiserver-advertise-address=$MASTER_IP \
   --apiserver-advertise-address=0.0.0.0 \     # 測試用
-  --pod-network-cidr=100.64.0.0/24 \
+  --pod-network-cidr=100.64.0.0/10 \
   --service-cluster-ip-range=10.96.0.0/22
 
-sudo kubeadm init --apiserver-advertise-address=0.0.0.0 --pod-network-cidr=100.64.0.0/24 --service-cidr=10.96.0.0/22  --cri-socket=unix:///var/run/containerd/containerd.sock --v=5
+sudo kubeadm init --apiserver-advertise-address=0.0.0.0 --pod-network-cidr=100.64.0.0/10 --service-cidr=10.96.0.0/22  --cri-socket=unix:///var/run/containerd/containerd.sock --v=5
 
 
 ```
@@ -185,23 +239,8 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 ## **步驟 5：安裝 Flannel（網路插件）**
 
 ```bash
---pod-network-cidr=100.64.0.0/10
-
 # 下載 Flannel YAML 配置檔
-wget https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-
-# 改 yml 檔裡面的 network。  (--pod-network-cidr=100.64.0.0/10)
-  net-conf.json: |
-    {
-      "Network": "10.64.0.0/10",
-      "EnableNFTables": false,
-      "Backend": {
-        "Type": "vxlan"
-      }
-    }
-
-
-kubectl apply -f ~/kube-flannel.yml
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 ```
 
 **檢查 Flannel 是否成功部署**
